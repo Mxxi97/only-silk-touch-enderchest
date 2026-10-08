@@ -1,0 +1,24 @@
+{
+  "_comment": "Mod metadata for the FABRIC jars. The dollar-brace placeholders are expanded by processResources in fabric/build.gradle -- unlike the other loaders this cannot be a build/generated template, because Loom parses this file straight from the source tree at configuration time. Fabric ships TWO jars: one remapped to intermediary for the obfuscated 1.21.x line, one plain for the unobfuscated 26.x line. They are not interchangeable, so the Minecraft range below is derived from which of the two is being built rather than hard-coded.",
+  "schemaVersion": 1,
+  "id": "${mod_id}",
+  "version": "${mod_version}",
+  "name": "${mod_name}",
+  "description": "${mod_description}",
+  "authors": [
+    "${mod_authors}"
+  ],
+  "license": "${mod_license}",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "drHirsch.only_silk_touch_enderchest.OnlySilkTouchEnderchest"
+    ]
+  },
+  "depends": {
+    "fabricloader": "${fabric_loader_range}",
+    "minecraft": "${fabric_minecraft_version_range}",
+    "java": ">=${java_version}",
+    "fabric-api": "*"
+  }
+}

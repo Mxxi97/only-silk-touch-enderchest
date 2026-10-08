@@ -1,0 +1,120 @@
+plugins {
+    id 'java'
+    id 'idea'
+    // Only put Loom on the classpath here. WHICH of its two plugin ids gets
+    // applied depends on the Minecraft version and is decided below.
+    id 'net.fabricmc.fabric-loom' version "${loom_version}" apply false
+}
+
+// The mod's identity lives in the ROOT gradle.properties, shared with the other
+// loaders, so bump-version.mjs and the metadata templates have a single source
+// of truth. This build's own gradle.properties only carries the Fabric version
+// axes.
+def shared = new Properties()
+file('../gradle.properties').withInputStream { shared.load(it) }
+def prop = { String name ->
+    def value = shared.getProperty(name)
+    if (value == null) throw new GradleException("Missing ${name} in ../gradle.properties")
+    value
+}
+
+group = prop('mod_group_id')
+version = prop('mod_version')
+def modId = prop('mod_id')
+
+base {
+    // Distinct from the other loaders' jars, so the artifacts can never be
+    // confused on Modrinth or in a mods folder. The release workflow appends the
+    // covered Minecraft range when it stages the file.
+    archivesName = "${modId}-fabric"
+}
+
+// Minecraft stopped being obfuscated with the switch to calendar versions, which
+// splits this build cleanly in two:
+//
+//   1.21.x  obfuscated. Loom needs mappings, the dependencies are mod artifacts
+//           that must themselves be remapped, and the produced jar is remapped to
+//           Fabric's intermediary names.
+//   26.x    plain. Minecraft, the loader and Fabric API are ordinary
+//           dependencies and nothing is remapped, exactly as in the upstream
+//           fabric-example-mod for these versions.
+//
+// Those two jars are not interchangeable, which is why Fabric is published as two
+// artifacts rather than one universal one. The release workflow derives that split
+// from the same rule.
+def obfuscated = minecraft_version.startsWith('1.')
+
+// Loom ships the same jar under two plugin ids and they are not aliases:
+//   'fabric-loom'                the real thing, sets up mappings and remapping
+//   'net.fabricmc.fabric-loom'   a marker that tells Loom NOT to set up remapping
+// The second one is what the unobfuscated 26.x builds want; asking it for Mojang
+// mappings fails with "Cannot use Mojang mappings in a non-obfuscated
+// environment", which is a confusing way to be told you picked the wrong id.
+apply plugin: obfuscated ? 'fabric-loom' : 'net.fabricmc.fabric-loom'
+
+// Java 21 through Minecraft 1.21.11; 25 from 26.1 onwards, because Mojang started
+// shipping Java 25 to players there. Same split as the obfuscation boundary.
+java.toolchain.languageVersion = JavaLanguageVersion.of(obfuscated ? 21 : 25)
+
+repositories {
+    maven {
+        name = 'Fabric'
+        url = 'https://maven.fabricmc.net/'
+    }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    if (obfuscated) {
+        // Official Mojang mappings rather than Yarn, so the shared rule in
+        // common/java compiles unchanged against all three loaders.
+        mappings loom.officialMojangMappings()
+        modImplementation "net.fabricmc:fabric-loader:${loader_version}"
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+    } else {
+        implementation "net.fabricmc:fabric-loader:${loader_version}"
+        implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+// Adds common/java and any legacy overlay. See the script for details.
+ext.repoRoot = file('..')
+ext.minecraftVersion = minecraft_version
+apply from: '../gradle/mod-sources.gradle'
+
+// Expands the ${...} placeholders in fabric.mod.json. Unlike the other loaders
+// this happens in processResources on the real resource file rather than a
+// generated template directory, because Loom parses fabric.mod.json straight from
+// the source tree at configuration time and would choke on a file that only
+// exists after a task has run.
+//
+// The Minecraft range is derived from the obfuscation split rather than
+// configured: each of the two Fabric jars must claim exactly its own half, or
+// players on the other half would be offered a jar that cannot load.
+processResources {
+    var replaceProperties = [fabric_minecraft_version_range: obfuscated ? '>=1.21.1 <1.22' : '>=26.1',
+                             fabric_loader_range           : '>=0.16.0',
+                             java_version                  : obfuscated ? '21' : '25',
+                             mod_id                        : modId,
+                             mod_name                      : prop('mod_name'),
+                             mod_license                   : prop('mod_license'),
+                             mod_version                   : prop('mod_version'),
+                             mod_authors                   : prop('mod_authors'),
+                             mod_description               : prop('mod_description')]
+    inputs.properties replaceProperties
+    filesMatching('fabric.mod.json') {
+        expand replaceProperties
+    }
+}
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}

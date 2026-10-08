@@ -1,0 +1,132 @@
+name: Build
+
+# No push trigger: PRs already run this same matrix before merge, release.yml
+# re-runs it as the publish gate, and the automation's own commits to main are
+# made with GITHUB_TOKEN, which never starts workflows anyway. A push trigger
+# would only burn the whole matrix on every merge for a third verification.
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      targets:
+        description: JSON array of targets to build. Defaults to everything in versions.json.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Pushing another commit to a PR makes the in-flight run pointless, and this
+# matrix is large enough that letting both run wastes real time.
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  targets:
+    name: Resolve targets
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          if [ -n "${{ inputs.targets }}" ]; then
+            echo '${{ inputs.targets }}' > targets.json
+          else
+            jq '.targets' versions.json > targets.json
+          fi
+          # One matrix entry per (target, loader) that the loader actually has a
+          # build for; a null version means that loader has not shipped for this
+          # Minecraft version yet and is simply skipped. `version` is the loader's
+          # own version axis. Fabric additionally needs the loader version, which
+          # is global, so it is stamped onto each fabric entry here rather than
+          # re-read from disk in the build job.
+          fabric_loader=$(jq -r '.fabric_loader // ""' versions.json)
+          jq -c --arg fl "$fabric_loader" '{include: [ .[] as $t | (
+              {minecraft: $t.minecraft, loader: "neoforge", version: $t.neoforge},
+              {minecraft: $t.minecraft, loader: "forge",    version: $t.forge},
+              {minecraft: $t.minecraft, loader: "fabric",   version: $t.fabric, fabric_loader: $fl}
+            ) | select(.version != null) ]}' targets.json > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          jq -r '.include[] | "  \(.minecraft) <- \(.loader) \(.version)"' matrix.json
+
+  build:
+    name: MC ${{ matrix.minecraft }} (${{ matrix.loader }})
+    needs: targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both toolchains, because Minecraft 1.21.x needs Java 21 and 26.x needs 25.
+      # Each loader's build picks the right one from its own version axis, so this
+      # job does not need to know which is which.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            21
+            25
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Parchment is deliberately not passed: it only affects decompiled Minecraft
+      # sources during development and has no effect on the jar.
+      # Each loader is a standalone Gradle build (Loom, ModDevGradle and
+      # ForgeGradle cannot share one), all driven through the same root wrapper.
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: |
+          case "${{ matrix.loader }}" in
+            neoforge)
+              ./gradlew build --no-daemon -Pneo_version=${{ matrix.version }}
+              ;;
+            forge)
+              ./gradlew -p forge build --no-daemon -Pforge_version=${{ matrix.version }}
+              ;;
+            fabric)
+              ./gradlew -p fabric build --no-daemon \
+                -Pminecraft_version=${{ matrix.minecraft }} \
+                -Pfabric_api_version=${{ matrix.version }} \
+                -Ploader_version=${{ matrix.fabric_loader }}
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        if: steps.build.outcome == 'success'
+        with:
+          name: only_silk_touch_enderchest-${{ matrix.loader }}-mc${{ matrix.minecraft }}
+          # Only one of these exists in any given job; the others are no-ops.
+          path: |
+            build/libs/*.jar
+            forge/build/libs/*.jar
+            fabric/build/libs/*.jar
+          if-no-files-found: error
+
+      - name: Report
+        run: |
+          if [ "${{ steps.build.outcome }}" != "success" ]; then
+            echo "::error title=Build failed::Minecraft ${{ matrix.minecraft }} (${{ matrix.loader }} ${{ matrix.version }})"
+            echo "- FAILED Minecraft ${{ matrix.minecraft }} (${{ matrix.loader }} ${{ matrix.version }})" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "- ok Minecraft ${{ matrix.minecraft }} (${{ matrix.loader }} ${{ matrix.version }})" >> "$GITHUB_STEP_SUMMARY"
+
+  result:
+    name: All targets
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any target failed
+        if: needs.build.result != 'success'
+        run: |
+          echo "At least one target failed to build. See the matrix jobs above."
+          exit 1
+      - run: echo "Every target built."

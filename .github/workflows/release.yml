@@ -1,0 +1,351 @@
+name: Release
+
+# Publishing is tied to main, not to a tag: whatever main says in
+# gradle.properties is what gets published, and the tag is created afterwards as
+# the record that it happened.
+#
+# The push trigger covers the human path (a PR from dev lands on main). It does
+# NOT cover the automation, because events created with GITHUB_TOKEN never start
+# other workflows -- cut-release.yml and update-versions.yml call
+# `gh workflow run release.yml` explicitly instead, which is the documented
+# exception.
+#
+# Either way the gate job below decides whether there is actually a new version
+# to publish, so a merge that did not touch mod_version costs one cheap job and
+# nothing reaches Modrinth.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the release tag and create the GitHub release
+  issues: write # the notify job files an issue when a release fails
+
+# Two releases must never interleave: they would race on the tag and could publish
+# the same version number twice.
+concurrency: release
+
+jobs:
+  gate:
+    name: Decide
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      version: ${{ steps.decide.outputs.version }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tag list is what tells us whether this version was already
+          # published, and a shallow checkout does not have it.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - id: decide
+        env:
+          MODRINTH_ID: ${{ vars.MODRINTH_ID }}
+        run: |
+          # gradle.properties is the single source of truth for the released
+          # version -- not the tag name, not the branch.
+          version=$(sed -n 's/^mod_version=//p' gradle.properties | tr -d '[:space:]')
+          if [ -z "$version" ]; then
+            echo "::error title=No mod_version::gradle.properties has no mod_version line."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # No Modrinth project configured at all means the repo has not been
+          # hooked up yet, which is a setup step rather than a broken release.
+          # Skipping keeps the very first merge to main from reporting a failure
+          # and filing an issue about it. A configured-but-wrong value still fails
+          # loudly, in the credentials step below.
+          if [ -z "$MODRINTH_ID" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "Nothing published: this repository has no Modrinth project configured yet."
+              echo
+              echo "Add the \`MODRINTH_ID\` variable and the \`MODRINTH_TOKEN\` secret under"
+              echo "Settings > Secrets and variables > Actions, then re-run this workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "MODRINTH_ID is not set; skipping the release."
+            exit 0
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is already tagged, so it has already been released. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            echo "v$version already released."
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Releasing **v$version**." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Checked before the matrix runs, so a missing or stale credential costs one
+      # minute instead of failing after every jar has been built. mc-publish only
+      # reports credential problems at the very end.
+      - name: Check publishing credentials
+        if: steps.decide.outputs.release == 'true'
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+          MODRINTH_ID: ${{ vars.MODRINTH_ID }}
+        run: |
+          if [ -z "$MODRINTH_TOKEN" ]; then
+            echo "::error title=Missing MODRINTH_TOKEN::Add it under Settings > Secrets and variables > Actions > Secrets."
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: $MODRINTH_TOKEN" https://api.modrinth.com/v2/user)
+          if [ "$code" != "200" ]; then
+            echo "::error title=MODRINTH_TOKEN rejected::Modrinth returned HTTP $code for /v2/user. Create a new token at https://modrinth.com/settings/pats with BOTH 'Read user data' and 'Create versions' scopes, then update the MODRINTH_TOKEN secret."
+            echo "Note: /v2/user needs the 'Read user data' scope, so a token scoped only to 'Create versions' also fails here even though it could publish." >&2
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            "https://api.modrinth.com/v2/project/$MODRINTH_ID")
+          if [ "$code" != "200" ]; then
+            echo "::error title=MODRINTH_ID not found::Modrinth returned HTTP $code for project '$MODRINTH_ID'. Use the project ID (Settings > General > Project ID), not the slug."
+            exit 1
+          fi
+          echo "Modrinth credentials look good."
+
+      # One matrix entry per jar the release has to produce. See
+      # .github/scripts/release-plan.mjs for how targets are grouped into jars.
+      - id: plan
+        if: steps.decide.outputs.release == 'true'
+        run: |
+          node .github/scripts/release-plan.mjs
+          echo "matrix=$(node .github/scripts/release-plan.mjs --matrix)" >> "$GITHUB_OUTPUT"
+          echo "count=$(node .github/scripts/release-plan.mjs --json | jq 'length')" >> "$GITHUB_OUTPUT"
+
+  # The full matrix is the release gate. A jar that claims a dozen Minecraft
+  # versions is only safe to publish because every one of them has just been
+  # proven to compile.
+  verify:
+    name: Verify all versions
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    uses: ./.github/workflows/build.yml
+
+  publish:
+    name: Publish ${{ matrix.loader }} ${{ matrix.range }}
+    needs: [gate, verify]
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      # One failed jar must not strand the others half-published; the verify job
+      # below reports what actually made it.
+      fail-fast: false
+      matrix: ${{ fromJson(needs.gate.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # 21 for the 1.21.x jars, 25 for the 26.x ones.
+          java-version: |
+            21
+            25
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Each group is compiled against its OLDEST member, so the jar cannot
+      # reference API that only the newer half of its range has, and its
+      # class-file version is the lowest the range allows.
+      - name: Build
+        run: |
+          case "${{ matrix.loader }}" in
+            neoforge)
+              ./gradlew build --no-daemon -Pneo_version=${{ matrix.loader_version }}
+              ;;
+            forge)
+              ./gradlew -p forge build --no-daemon -Pforge_version=${{ matrix.loader_version }}
+              ;;
+            fabric)
+              ./gradlew -p fabric build --no-daemon \
+                -Pminecraft_version=${{ matrix.minecraft }} \
+                -Pfabric_api_version=${{ matrix.loader_version }} \
+                -Ploader_version=${{ matrix.fabric_loader }}
+              ;;
+          esac
+
+      - name: Stage and sanity-check the jar
+        run: |
+          mkdir -p staging
+          jar=$(ls ${{ matrix.jar_glob }})
+          cp "$jar" "staging/${{ matrix.artifact }}.jar"
+          jar="staging/${{ matrix.artifact }}.jar"
+          echo "Publishing $jar"
+
+          # Java 21 bytecode is class-file major version 65, Java 25 is 69. A jar
+          # whose range starts in 1.21.x must be 65 or it will not load on the
+          # older half of its own range.
+          case "${{ matrix.minecraft }}" in
+            1.*) expected=65 ;;
+            *)   expected=69 ;;
+          esac
+          unzip -p "$jar" drHirsch/only_silk_touch_enderchest/SilkTouch.class \
+            | od -An -tu1 -j6 -N2 \
+            | awk -v e="$expected" '{v=$1*256+$2; print "class file major version: " v; if (v != e) { print "::error::Expected " e ", got " v; exit 1 }}'
+
+          # And that the metadata template actually got expanded.
+          case "${{ matrix.loader }}" in
+            neoforge) unzip -p "$jar" META-INF/neoforge.mods.toml | grep -q 'modId = "only_silk_touch_enderchest"' ;;
+            forge)    unzip -p "$jar" META-INF/mods.toml          | grep -q 'modId = "only_silk_touch_enderchest"' ;;
+            fabric)   unzip -p "$jar" fabric.mod.json             | jq -e '.id == "only_silk_touch_enderchest"' ;;
+          esac
+
+      - name: Publish to Modrinth
+        uses: Kira-NT/mc-publish@v3.3.1
+        with:
+          # The immutable Modrinth project id, not the slug, so renaming the
+          # project cannot break releases. Checked by the gate job above.
+          modrinth-id: ${{ vars.MODRINTH_ID }}
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          files: staging/${{ matrix.artifact }}.jar
+          loaders: ${{ matrix.loader }}
+          # Every version this jar's group just proved it compiles against, listed
+          # explicitly rather than inferred from the jar's declared range.
+          game-versions: ${{ matrix.game_versions_text }}
+          game-version-filter: none
+          version: ${{ matrix.version_number }}
+          name: ${{ matrix.name }}
+          version-type: release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/${{ matrix.artifact }}.jar
+          if-no-files-found: error
+
+  # Tagging last, not first: a release that failed halfway can simply be re-run,
+  # because the gate only treats a version as done once its tag exists.
+  tag-and-release:
+    name: Tag and publish the GitHub release
+    needs: [gate, publish]
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: jars
+          merge-multiple: true
+
+      - name: Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ needs.gate.outputs.version }}"
+          git push origin "v${{ needs.gate.outputs.version }}"
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ needs.gate.outputs.version }}" jars/*.jar \
+            --title "v${{ needs.gate.outputs.version }}" \
+            --generate-notes
+
+  # Confirm against the Modrinth API rather than trusting the publish steps to
+  # have done what they reported. Silently dropping every game version is a real
+  # failure mode of mc-publish and it reports success while doing it.
+  verify-published:
+    name: Verify the release reached Modrinth
+    needs: [gate, publish]
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the plan against what Modrinth lists
+        env:
+          MODRINTH_ID: ${{ vars.MODRINTH_ID }}
+          PLAN: ${{ needs.gate.outputs.matrix }}
+        run: |
+          echo "$PLAN" | jq '.include' > plan.json
+
+          verify () {
+            published=$(curl -sS "https://api.modrinth.com/v2/project/$MODRINTH_ID/version")
+            ok=true
+            while read -r row; do
+              v=$(echo "$row" | jq -r '.version_number')
+              loader=$(echo "$row" | jq -r '.loader')
+              expected=$(echo "$row" | jq '.game_versions | length')
+              actual=$(echo "$published" | jq --arg v "$v" '[.[] | select(.version_number == $v)] | first')
+              if [ "$actual" = "null" ] || [ -z "$actual" ]; then
+                echo "  missing: $v"; ok=false; continue
+              fi
+              if [ "$(echo "$actual" | jq --arg l "$loader" '.loaders | index($l)')" = "null" ]; then
+                echo "  $v is not tagged with loader '$loader'"; ok=false; continue
+              fi
+              count=$(echo "$actual" | jq '.game_versions | length')
+              if [ "$count" != "$expected" ]; then
+                echo "  $v has $count game versions, expected $expected"; ok=false; continue
+              fi
+              echo "  ok: $v ($loader, $count game versions)"
+            done < <(jq -c '.[]' plan.json)
+            [ "$ok" = true ]
+          }
+
+          # The version listing lags a little behind uploads, so give Modrinth up
+          # to two minutes to become consistent before failing.
+          for attempt in 1 2 3 4 5 6; do
+            echo "Attempt $attempt:"
+            if verify; then
+              echo "All ${{ needs.gate.outputs.count }} jars are live on Modrinth." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            [ "$attempt" = 6 ] || sleep 20
+          done
+
+          echo "::error title=Release not verified::Modrinth does not show everything the plan expected. Current listing:"
+          curl -sS "https://api.modrinth.com/v2/project/$MODRINTH_ID/version" \
+            | jq -r '.[] | "\(.version_number)  loaders=\(.loaders|join(","))  versions=\(.game_versions|length)"'
+          exit 1
+
+  # Releases are usually started by the daily automation with GITHUB_TOKEN, and
+  # nobody gets a failure email for those runs. An issue is the only signal the
+  # maintainer actually sees.
+  notify-failure:
+    name: File an issue on failure
+    needs: [gate, verify, publish, tag-and-release, verify-published]
+    # Not gated on gate.outputs.release: the gate job itself failing (a rejected
+    # Modrinth token, say) is exactly the case nobody would otherwise hear about.
+    # A run that merely decided there was nothing to release does not reach here,
+    # because deciding that is a success.
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open an issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Falls back to the branch when the gate failed before it could read the
+          # version out of gradle.properties.
+          VERSION: ${{ needs.gate.outputs.version || github.ref_name }}
+        run: |
+          TITLE="Release v$VERSION failed"
+
+          # Don't file the same issue on every retry of the same version.
+          existing=$(gh issue list -R "${{ github.repository }}" --state open \
+            --search "$TITLE in:title" --json number --jq 'length')
+          if [ "$existing" != "0" ]; then
+            echo "An open issue already tracks this failed release."
+            exit 0
+          fi
+
+          {
+            echo "Publishing **v$VERSION** failed."
+            echo
+            echo "See the run for details:"
+            echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "No tag was created, so once the cause is fixed the release can simply be"
+            echo "re-run from the Actions tab (Release > Run workflow on \`main\`)."
+          } > issue.md
+
+          gh issue create -R "${{ github.repository }}" --title "$TITLE" --body-file issue.md

@@ -1,0 +1,22 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+    }
+
+    // The ModDevGradle version is a property so CI can pin or bump it per build
+    // (-Pmoddev_version=..., or ORG_GRADLE_PROJECT_moddev_version=...). build.gradle
+    // then declares the plugin without a version.
+    plugins {
+        id 'net.neoforged.moddev' version providers.gradleProperty('moddev_version').getOrElse('2.0.147')
+    }
+}
+
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+// The Fabric and Forge builds are deliberately NOT included here. Loom,
+// ModDevGradle and the legacy-Forge variant each rewire the Minecraft dependency
+// for the whole build, so they cannot share one. They are standalone builds under
+// fabric/ and forge/, driven through this same wrapper with `-p fabric` / `-p forge`.
+rootProject.name = 'only-silk-touch-enderchest'

@@ -1,0 +1,104 @@
+plugins {
+    id 'java-library'
+    id 'idea'
+    // Version is resolved in settings.gradle from the moddev_version property.
+    id 'net.neoforged.moddev'
+}
+
+group = mod_group_id
+
+base {
+    archivesName = "${mod_id}-neoforge"
+}
+
+// The one and only version axis. Override with -Pneo_version=...
+// The full set of supported versions lives in versions.json at the repo root.
+def neoVersion = providers.gradleProperty('neo_version').get()
+
+neoForge {
+    version = neoVersion
+
+    runs {
+        client {
+            client()
+        }
+
+        server {
+            server()
+            programArgument '--nogui'
+        }
+
+        configureEach {
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            logLevel = org.slf4j.event.Level.DEBUG
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Everything below is derived from the NeoForge version rather than configured.
+// ModDevGradle resolves both of these once neoForge.version is set, which is why
+// the CI matrix only has to carry neo_version: it cannot drift out of sync with
+// the Minecraft version, and it survives Minecraft's switch from 1.21.x to 26.x
+// version numbering without needing a lookup table.
+// ---------------------------------------------------------------------------
+
+// "1.21.8" on the old scheme, "26.2" on the new one.
+def minecraftVersion = neoForge.minecraftVersion
+
+// 21 through Minecraft 1.21.11; 25 from 26.1 onwards, because Mojang started
+// shipping Java 25 to players there.
+java.toolchain.languageVersion = JavaLanguageVersion.of(neoForge.versionCapabilities.javaVersion)
+
+// One universal jar, so no Minecraft version in the name. The rule is pure data
+// component and block-state API that has not moved across the supported range,
+// so the bytecode is identical for every version -- only the class-file stamp
+// differs with the toolchain. That is why releases are built against the OLDEST
+// supported NeoForge: it pins the output to Java 21 bytecode (loadable by the
+// Java 25 JVM that Minecraft 26.x ships) and guarantees nothing newer than the
+// whole range offers can be referenced.
+version = mod_version
+
+// Adds common/java and any per-version overlay. See the script for details.
+ext.repoRoot = projectDir
+ext.minecraftVersion = minecraftVersion
+apply from: 'gradle/mod-sources.gradle'
+
+dependencies {
+    // This mod has no dependencies beyond NeoForge itself.
+}
+
+// Expands the ${...} placeholders in src/main/templates into the real mod metadata.
+// A missing property is an error.
+var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+    var replaceProperties = [minecraft_version_range: minecraft_version_range,
+                             neo_version_range      : neo_version_range,
+                             loader_version_range   : loader_version_range,
+                             mod_id                 : mod_id,
+                             mod_name               : mod_name,
+                             mod_license            : mod_license,
+                             mod_version            : mod_version,
+                             mod_authors            : mod_authors,
+                             mod_description        : mod_description]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from "src/main/templates"
+    into "build/generated/sources/modMetadata"
+}
+
+// Works for both a Gradle build and an IDE sync.
+sourceSets.main.resources.srcDir generateModMetadata
+neoForge.ideSyncTask generateModMetadata
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}

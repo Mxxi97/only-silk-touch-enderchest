@@ -1,0 +1,237 @@
+name: Check for new Minecraft and loader versions
+
+on:
+  schedule:
+    # Daily, 06:00 UTC. Cheap: only the single-runner discover job runs on a quiet
+    # day; try-build and update only start when something new appeared.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write # the update job dispatches release.yml
+
+jobs:
+  discover:
+    name: Discover
+    runs-on: ubuntu-latest
+    outputs:
+      stale: ${{ steps.check.outputs.stale }}
+      added: ${{ steps.check.outputs.added }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Compare versions.json against Mojang, NeoForge, Forge and Fabric
+        id: check
+        run: node .github/scripts/discover-versions.mjs --check --soft
+
+      - id: matrix
+        if: steps.check.outputs.stale == 'true' && steps.check.outputs.added != '[]'
+        # Same per-loader expansion as build.yml: every newly covered target is
+        # tried on each loader that has a build for it. The Fabric loader version
+        # comes from the script's output, NOT from versions.json -- this checkout
+        # still has the old file.
+        run: |
+          echo '${{ steps.check.outputs.added }}' \
+            | jq -c --arg fl "${{ steps.check.outputs.fabric_loader }}" '{include: [ .[] as $t | (
+                {minecraft: $t.minecraft, loader: "neoforge", version: $t.neoforge},
+                {minecraft: $t.minecraft, loader: "forge",    version: $t.forge},
+                {minecraft: $t.minecraft, loader: "fabric",   version: $t.fabric, fabric_loader: $fl}
+              ) | select(.version != null) ]}' > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          jq -r '.include[] | "  \(.minecraft) <- \(.loader) \(.version)"' matrix.json
+
+      - name: Nothing to do
+        if: steps.check.outputs.stale != 'true'
+        run: echo "Already building against everything available." >> "$GITHUB_STEP_SUMMARY"
+
+  # New targets are built before anything is committed, so versions.json never
+  # gains a target that does not compile.
+  try-build:
+    name: Try MC ${{ matrix.minecraft }} (${{ matrix.loader }})
+    needs: discover
+    if: needs.discover.outputs.stale == 'true' && needs.discover.outputs.added != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            21
+            25
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          case "${{ matrix.loader }}" in
+            neoforge)
+              ./gradlew build --no-daemon -Pneo_version=${{ matrix.version }} 2>&1 | tee build.log
+              ;;
+            forge)
+              ./gradlew -p forge build --no-daemon -Pforge_version=${{ matrix.version }} 2>&1 | tee build.log
+              ;;
+            fabric)
+              ./gradlew -p fabric build --no-daemon \
+                -Pminecraft_version=${{ matrix.minecraft }} \
+                -Pfabric_api_version=${{ matrix.version }} \
+                -Ploader_version=${{ matrix.fabric_loader }} 2>&1 | tee build.log
+              ;;
+          esac
+
+      - name: Open an issue if it does not compile
+        if: steps.build.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "Port to Minecraft ${{ matrix.minecraft }} (${{ matrix.loader }} ${{ matrix.version }})"
+        run: |
+          # Don't file the same issue every day.
+          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq 'length')
+          if [ "$existing" != "0" ]; then
+            echo "An open issue already tracks this version."
+            exit 0
+          fi
+
+          # Where the loader's own entry point lives. The shared rule in
+          # common/java is almost never the thing that breaks -- it only uses
+          # Minecraft API that has been stable since 1.20.5 -- so the compile
+          # error is nearly always in the ~20-line loader entry point.
+          case "${{ matrix.loader }}" in
+            neoforge) dir="src" ;;
+            *)        dir="${{ matrix.loader }}/src" ;;
+          esac
+
+          {
+            echo "Minecraft **${{ matrix.minecraft }}** is out and ${{ matrix.loader }} **${{ matrix.version }}** is available,"
+            echo "but the mod no longer compiles against it, so it was not added to \`versions.json\`."
+            echo
+            echo "Every other supported version and loader is unaffected and still builds."
+            echo
+            echo "### How to fix"
+            echo
+            echo "\`$dir/main/java\` deliberately targets the NEWEST supported version, so the fix is"
+            echo "to update it for ${{ matrix.minecraft }} and then pin the versions that still need the"
+            echo "old code by moving the current file into:"
+            echo
+            echo '```'
+            echo "$dir/versions/upto-<lastVersionOnTheOldApi>/java/drHirsch/only_silk_touch_enderchest/"
+            echo '```'
+            echo
+            echo "A file there replaces the same-named file from \`$dir/main/java\` and \`common/java\`"
+            echo "for every Minecraft version at or below that one. The release pipeline picks the"
+            echo "split up automatically -- \`release-plan.mjs\` groups targets by the sources they"
+            echo "actually compile, so a new overlay becomes a new jar without any further changes."
+            echo
+            echo "Then verify with:"
+            echo
+            echo '```'
+            echo "node .github/scripts/build-all.mjs --loader ${{ matrix.loader }}"
+            echo "node .github/scripts/release-plan.mjs"
+            echo "node .github/scripts/discover-versions.mjs"
+            echo '```'
+            echo
+            echo "### Compile errors"
+            echo
+            echo '```'
+            grep -E '^(e: |error:|.*\.java:[0-9]+:|> Task .* FAILED|FAILURE:|Caused by:)' build.log | head -40 || tail -40 build.log
+            echo '```'
+          } > issue.md
+
+          gh issue create --title "$TITLE" --body-file issue.md --label "version-port" || \
+            gh issue create --title "$TITLE" --body-file issue.md
+
+      # Without this the job would conclude "success" even when the build failed:
+      # continue-on-error leaves the step's *outcome* as failure but its
+      # *conclusion* as success, and creating the issue exits 0. The update job
+      # below gates on this job's result, so the gate would never actually close.
+      # fail-fast is off, so every new target is still attempted and still files
+      # its own issue before this runs.
+      - name: Fail the job if this version does not compile
+        if: steps.build.outcome != 'success'
+        run: exit 1
+
+  # Only if every new target built. If one failed, its issue is the signal, and the
+  # next scheduled run picks things up once it has been ported.
+  #
+  # This is the zero-touch path: no PR, no human. try-build has just proven every
+  # new target compiles, so the update is committed straight to main, the version
+  # is bumped and the release workflow is dispatched -- the mod appears on Modrinth
+  # with the new game versions without anyone touching the repo.
+  update:
+    name: Update versions.json and release
+    needs: [discover, try-build]
+    # try-build is 'skipped' when the change is metadata-only (no new coverage):
+    # a loader build bump, a new Fabric API, a parchment or ModDev update. Those
+    # must still be committed -- gating on try-build success alone would leave
+    # versions.json permanently stale and this workflow reporting the same diff
+    # every day. Release-worthy changes additionally require try-build green.
+    if: ${{ !cancelled() && needs.discover.outputs.stale == 'true' && (needs.try-build.result == 'success' || needs.try-build.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    # Same group as cut-release.yml, so the automation can never race a manual
+    # release into conflicting pushes on main.
+    concurrency: cut-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The bump script skips versions whose tag already exists, so it needs
+          # the full tag list, which a shallow checkout does not have.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Regenerate versions.json and the README table
+        run: node .github/scripts/discover-versions.mjs
+
+      # Metadata-only path: a loader shipped a new build, but nothing changed for
+      # players. Keep the file current and stop there -- no version bump, no
+      # release, nothing new on Modrinth.
+      - name: Commit metadata-only update
+        if: needs.discover.outputs.added == '[]'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add versions.json README.md
+          git commit -m "Update loader version metadata"
+          git push origin main
+          echo "Metadata-only update. Nothing published." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Bump mod_version
+        if: needs.discover.outputs.added != '[]'
+        id: bump
+        run: node .github/scripts/bump-version.mjs --bump patch
+
+      - name: Commit and push
+        if: needs.discover.outputs.added != '[]'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add versions.json README.md gradle.properties
+          git commit -m "Support new Minecraft versions; release v${{ steps.bump.outputs.version }}"
+          git push origin main
+
+      - name: Dispatch the release workflow
+        if: needs.discover.outputs.added != '[]'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The push above cannot trigger release.yml on its own: events created
+          # with GITHUB_TOKEN never start other workflows. workflow_dispatch is the
+          # documented exception.
+          gh workflow run release.yml --ref main
+          {
+            echo "Releasing **v${{ steps.bump.outputs.version }}** with the new game versions."
+            echo
+            echo "Publishing runs in the [Release workflow](${{ github.server_url }}/${{ github.repository }}/actions/workflows/release.yml)."
+          } >> "$GITHUB_STEP_SUMMARY"
