@@ -141,6 +141,12 @@ Day-to-day work happens on `dev` and reaches `main` through a pull request.
 The release workflow checks both before building anything and fails with a pointed
 message rather than halfway through publishing.
 
+A brand-new Modrinth project is a **draft**: it is invisible to anyone but its
+owner, so every API call about it has to carry the token. That is why the checks
+here are authenticated, and it is normal for the first release to publish into a
+draft — Modrinth wants a version to exist before you can submit the project for
+review. The versions appear publicly once the project itself is approved.
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
