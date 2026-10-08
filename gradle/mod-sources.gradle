@@ -1,0 +1,91 @@
+/**
+ * Shared source-set wiring, applied by all three loader builds.
+ *
+ * Each loader is a standalone Gradle build (Loom, ModDevGradle and its
+ * legacy-Forge variant each rewire the Minecraft dependency for a whole build,
+ * so they cannot be subprojects of one another). This script is the one thing
+ * they do share.
+ *
+ * Expects two ext properties to be set before `apply from:`
+ *   ext.repoRoot         - File, the repository root
+ *   ext.minecraftVersion - String, the Minecraft version this build targets
+ *
+ * It does two things:
+ *
+ *  1. Adds <repo>/common/java to the main source set, so the actual rule exists
+ *     exactly once and is compiled into every loader's jar. Only the ~20-line
+ *     entry point under src/main/java is per-loader.
+ *
+ *  2. Legacy source overlays. src/main/java always targets the NEWEST supported
+ *     Minecraft version, so a new Minecraft release needs no change here in the
+ *     common case. Older versions whose loader API has since moved are covered
+ *     by a directory named
+ *
+ *         src/versions/upto-<minecraftVersion>/java
+ *
+ *     which applies to every Minecraft version at or below <minecraftVersion>.
+ *     A file in it REPLACES the same-named file from the base roots
+ *     (src/main/java and common/java) rather than colliding with it. When
+ *     several upto- directories match, the lowest one wins, so eras can be
+ *     stacked as the mod ages.
+ *
+ *     "At or below" rather than an exact version or a series is deliberate:
+ *     NeoForge moved BlockEvent.BreakEvent to BreakBlockEvent in the middle of
+ *     the 26.1 line, so neither "this exact version" nor "this series" can
+ *     describe the split without duplicating the same file a dozen times.
+ */
+
+def commonRoot = new File(repoRoot, 'common/java')
+if (!commonRoot.isDirectory()) {
+    throw new GradleException("Shared sources not found at ${commonRoot}")
+}
+sourceSets.main.java.srcDir commonRoot
+
+// Component-wise numeric compare. Works across Minecraft's switch from 1.21.x to
+// calendar versioning for free, since 1 sorts below 26.
+def compareVersions = { String a, String b ->
+    def parts = { String v -> v.tokenize('.').collect { it.isInteger() ? it.toInteger() : 0 } }
+    def left = parts(a)
+    def right = parts(b)
+    for (int i = 0; i < Math.max(left.size(), right.size()); i++) {
+        int diff = (i < left.size() ? left[i] : 0) - (i < right.size() ? right[i] : 0)
+        if (diff != 0) {
+            return diff
+        }
+    }
+    return 0
+}
+
+def versionsDir = file('src/versions')
+def overlayRoot = null
+if (versionsDir.isDirectory()) {
+    overlayRoot = versionsDir.listFiles()
+            .findAll { it.isDirectory() && it.name.startsWith('upto-') }
+            .findAll { compareVersions(minecraftVersion, it.name.substring('upto-'.length())) <= 0 }
+            .sort { a, b -> compareVersions(a.name.substring('upto-'.length()), b.name.substring('upto-'.length())) }
+            .collect { new File(it, 'java') }
+            .find { it.isDirectory() }
+}
+
+def overriddenPaths = [] as Set
+if (overlayRoot != null) {
+    def overlayBase = overlayRoot.toPath()
+    overlayRoot.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+        // Joined from path elements so the keys use '/' on every platform, matching
+        // FileTreeElement.relativePath.pathString below.
+        overriddenPaths << overlayBase.relativize(f.toPath()).collect { it.toString() }.join('/')
+    }
+    sourceSets.main.java.srcDir overlayRoot
+    logger.lifecycle("Minecraft ${minecraftVersion}: using source overlay ${overlayRoot.parentFile.name} (overrides: ${overriddenPaths.join(', ')})")
+}
+
+if (!overriddenPaths.isEmpty()) {
+    // A plain exclude('some/Path.java') would apply to every srcDir and drop the
+    // overlay copy too, so discriminate on the absolute path of the source root.
+    def basePrefixes = [file('src/main/java').absolutePath, commonRoot.absolutePath]
+    sourceSets.main.java.exclude { org.gradle.api.file.FileTreeElement element ->
+        !element.directory &&
+                basePrefixes.any { element.file.absolutePath.startsWith(it) } &&
+                overriddenPaths.contains(element.relativePath.pathString)
+    }
+}

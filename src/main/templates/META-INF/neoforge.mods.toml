@@ -1,0 +1,38 @@
+# Mod metadata. The placeholders below are expanded by the generateModMetadata
+# task in build.gradle.
+#
+# This is a single universal jar: the compiled bytecode is identical for every
+# supported Minecraft version, so the declared ranges are deliberately wide
+# rather than pinned to whichever NeoForge build produced the jar.
+#
+# modLoader/loaderVersion are optional on modern NeoForge but were mandatory on
+# the older loaders in the supported range. FML parses this file at game startup,
+# not at build time, so a missing mandatory field would build green and fail
+# in-game -- hence they stay.
+#
+# Format reference: https://docs.neoforged.net/docs/gettingstarted/modfiles/
+
+modLoader = "javafml"
+loaderVersion = "${loader_version_range}"
+license = "${mod_license}"
+
+[[mods]]
+modId = "${mod_id}"
+version = "${mod_version}"
+displayName = "${mod_name}"
+authors = "${mod_authors}"
+description = '''${mod_description}'''
+
+[[dependencies."${mod_id}"]]
+modId = "neoforge"
+type = "required"
+versionRange = "${neo_version_range}"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies."${mod_id}"]]
+modId = "minecraft"
+type = "required"
+versionRange = "${minecraft_version_range}"
+ordering = "NONE"
+side = "BOTH"
