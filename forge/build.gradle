@@ -1,0 +1,109 @@
+plugins {
+    id 'java-library'
+    id 'idea'
+    // ForgeGradle 7 covers the whole supported range: both the 1.21.1 and the
+    // 1.21.11 MDKs ship this same constraint. ModDevGradle's legacyforge plugin
+    // is NOT an option here -- it only goes up to Minecraft 1.20.1.
+    id 'net.minecraftforge.gradle' version '[7.0.3,8)'
+}
+
+// The mod's identity lives in the ROOT gradle.properties, shared with the other
+// loaders, so bump-version.mjs and the metadata templates have a single source
+// of truth. This build's own gradle.properties only carries the Forge version
+// axis and the Forge-dialect ranges.
+def shared = new Properties()
+file('../gradle.properties').withInputStream { shared.load(it) }
+def prop = { String name ->
+    def value = shared.getProperty(name)
+    if (value == null) throw new GradleException("Missing ${name} in ../gradle.properties")
+    value
+}
+
+group = prop('mod_group_id')
+version = prop('mod_version')
+def modId = prop('mod_id')
+
+base {
+    // Distinct from the other loaders' jars, so the artifacts can never be
+    // confused on Modrinth or in a mods folder. The release workflow appends the
+    // covered Minecraft range when it stages the file.
+    archivesName = "${modId}-forge"
+}
+
+// The one and only version axis, in Forge's own "<minecraft>-<forge>" form.
+// Override with -Pforge_version=... The full set of supported versions lives in
+// versions.json at the repo root.
+def forgeVersion = providers.gradleProperty('forge_version').get()
+// Forge coordinates always lead with the Minecraft version they are for, which is
+// why this build needs no second input and cannot drift out of sync with it.
+def minecraftVersion = forgeVersion.tokenize('-')[0]
+
+// Java 21 through Minecraft 1.21.11; 25 from 26.1 onwards, because Mojang started
+// shipping Java 25 to players there.
+java.toolchain.languageVersion = JavaLanguageVersion.of(minecraftVersion.startsWith('1.') ? 21 : 25)
+
+minecraft {
+    // Official Mojang mappings, so the shared rule in common/java compiles
+    // unchanged against all three loaders. ForgeGradle reobfuscates the jar to
+    // SRG on the way out.
+    mappings channel: 'official', version: minecraftVersion
+
+    runs {
+        configureEach {
+            workingDir = layout.projectDirectory.dir('run')
+        }
+
+        register('client')
+
+        register('server') {
+            args '--nogui'
+        }
+    }
+}
+
+repositories {
+    minecraft.mavenizer(it)
+    maven fg.forgeMaven
+    maven fg.minecraftLibsMaven
+    mavenCentral()
+}
+
+dependencies {
+    implementation minecraft.dependency("net.minecraftforge:forge:${forgeVersion}")
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+// Adds common/java and any legacy overlay. See the script for details.
+ext.repoRoot = file('..')
+ext.minecraftVersion = minecraftVersion
+apply from: '../gradle/mod-sources.gradle'
+
+// Expands the ${...} placeholders in src/main/templates into the real mod metadata.
+// A missing property is an error.
+var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+    var replaceProperties = [minecraft_version_range: minecraft_version_range,
+                             forge_version_range    : forge_version_range,
+                             loader_version_range   : loader_version_range,
+                             mod_id                 : modId,
+                             mod_name               : prop('mod_name'),
+                             mod_license            : prop('mod_license'),
+                             mod_version            : prop('mod_version'),
+                             mod_authors            : prop('mod_authors'),
+                             mod_description        : prop('mod_description')]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from "src/main/templates"
+    into "build/generated/sources/modMetadata"
+}
+
+sourceSets.main.resources.srcDir generateModMetadata
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
