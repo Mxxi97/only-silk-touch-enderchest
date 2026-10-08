@@ -105,10 +105,15 @@ jobs:
             echo "Note: /v2/user needs the 'Read user data' scope, so a token scoped only to 'Create versions' also fails here even though it could publish." >&2
             exit 1
           fi
+          # Authenticated, because a project that has never been published is a
+          # DRAFT and Modrinth serves 404 for drafts to anonymous callers. An
+          # unauthenticated probe here rejected a perfectly good project id on the
+          # very first release, which is exactly when the project is still a draft.
           code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: $MODRINTH_TOKEN" \
             "https://api.modrinth.com/v2/project/$MODRINTH_ID")
           if [ "$code" != "200" ]; then
-            echo "::error title=MODRINTH_ID not found::Modrinth returned HTTP $code for project '$MODRINTH_ID'. Use the project ID (Settings > General > Project ID), not the slug."
+            echo "::error title=MODRINTH_ID not usable::Modrinth returned HTTP $code for project '$MODRINTH_ID', with the token attached. Check that MODRINTH_ID is the project ID from Settings > General (not the slug) and that the token belongs to the account that owns it."
             exit 1
           fi
           echo "Modrinth credentials look good."
@@ -265,12 +270,20 @@ jobs:
       - name: Compare the plan against what Modrinth lists
         env:
           MODRINTH_ID: ${{ vars.MODRINTH_ID }}
+          # Needed, not optional: while the project is still a draft its version
+          # listing is only served to the owner.
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
           PLAN: ${{ needs.gate.outputs.matrix }}
         run: |
           echo "$PLAN" | jq '.include' > plan.json
 
+          listing () {
+            curl -sS -H "Authorization: $MODRINTH_TOKEN" \
+              "https://api.modrinth.com/v2/project/$MODRINTH_ID/version"
+          }
+
           verify () {
-            published=$(curl -sS "https://api.modrinth.com/v2/project/$MODRINTH_ID/version")
+            published=$(listing)
             ok=true
             while read -r row; do
               v=$(echo "$row" | jq -r '.version_number')
@@ -304,8 +317,7 @@ jobs:
           done
 
           echo "::error title=Release not verified::Modrinth does not show everything the plan expected. Current listing:"
-          curl -sS "https://api.modrinth.com/v2/project/$MODRINTH_ID/version" \
-            | jq -r '.[] | "\(.version_number)  loaders=\(.loaders|join(","))  versions=\(.game_versions|length)"'
+          listing | jq -r '.[] | "\(.version_number)  loaders=\(.loaders|join(","))  versions=\(.game_versions|length)"'
           exit 1
 
   # Releases are usually started by the daily automation with GITHUB_TOKEN, and
