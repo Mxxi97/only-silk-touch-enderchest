@@ -47,6 +47,8 @@ jobs:
           node-version: 22
 
       - id: decide
+        env:
+          MODRINTH_ID: ${{ vars.MODRINTH_ID }}
         run: |
           # gradle.properties is the single source of truth for the released
           # version -- not the tag name, not the branch.
@@ -56,6 +58,23 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # No Modrinth project configured at all means the repo has not been
+          # hooked up yet, which is a setup step rather than a broken release.
+          # Skipping keeps the very first merge to main from reporting a failure
+          # and filing an issue about it. A configured-but-wrong value still fails
+          # loudly, in the credentials step below.
+          if [ -z "$MODRINTH_ID" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "Nothing published: this repository has no Modrinth project configured yet."
+              echo
+              echo "Add the \`MODRINTH_ID\` variable and the \`MODRINTH_TOKEN\` secret under"
+              echo "Settings > Secrets and variables > Actions, then re-run this workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "MODRINTH_ID is not set; skipping the release."
+            exit 0
+          fi
 
           if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "release=false" >> "$GITHUB_OUTPUT"
@@ -75,10 +94,6 @@ jobs:
           MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
           MODRINTH_ID: ${{ vars.MODRINTH_ID }}
         run: |
-          if [ -z "$MODRINTH_ID" ]; then
-            echo "::error title=Missing MODRINTH_ID::Add the Modrinth project id under Settings > Secrets and variables > Actions > Variables. It must be a Variable, not a Secret."
-            exit 1
-          fi
           if [ -z "$MODRINTH_TOKEN" ]; then
             echo "::error title=Missing MODRINTH_TOKEN::Add it under Settings > Secrets and variables > Actions > Secrets."
             exit 1
