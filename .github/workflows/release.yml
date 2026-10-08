@@ -314,13 +314,19 @@ jobs:
   notify-failure:
     name: File an issue on failure
     needs: [gate, verify, publish, tag-and-release, verify-published]
-    if: failure() && needs.gate.outputs.release == 'true'
+    # Not gated on gate.outputs.release: the gate job itself failing (a rejected
+    # Modrinth token, say) is exactly the case nobody would otherwise hear about.
+    # A run that merely decided there was nothing to release does not reach here,
+    # because deciding that is a success.
+    if: failure()
     runs-on: ubuntu-latest
     steps:
       - name: Open an issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.gate.outputs.version }}
+          # Falls back to the branch when the gate failed before it could read the
+          # version out of gradle.properties.
+          VERSION: ${{ needs.gate.outputs.version || github.ref_name }}
         run: |
           TITLE="Release v$VERSION failed"
 
