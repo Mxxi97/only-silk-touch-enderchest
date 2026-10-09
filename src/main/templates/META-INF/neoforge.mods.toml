@@ -21,6 +21,7 @@ modId = "${mod_id}"
 version = "${mod_version}"
 displayName = "${mod_name}"
 authors = "${mod_authors}"
+logoFile = "${mod_id}.png"
 description = '''${mod_description}'''
 
 # The whole mod: one client-only mixin, shared with the other loaders.

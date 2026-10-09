@@ -9,6 +9,7 @@
     "${mod_authors}"
   ],
   "license": "${mod_license}",
+  "icon": "only_silk_touch_enderchest.png",
   "environment": "client",
   "mixins": [
     "only_silk_touch_enderchest.mixins.json"
