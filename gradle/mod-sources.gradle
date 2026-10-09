@@ -10,7 +10,7 @@
  *   ext.repoRoot         - File, the repository root
  *   ext.minecraftVersion - String, the Minecraft version this build targets
  *
- * It does two things:
+ * It does two things (and adds <repo>/common/resources as a resource root):
  *
  *  1. Adds <repo>/common/java to the main source set, so the actual rule exists
  *     exactly once and is compiled into every loader's jar. Only the ~20-line
@@ -40,6 +40,8 @@ if (!commonRoot.isDirectory()) {
     throw new GradleException("Shared sources not found at ${commonRoot}")
 }
 sourceSets.main.java.srcDir commonRoot
+// Loader-independent resources: the mod icon.
+sourceSets.main.resources.srcDir new File(repoRoot, 'common/resources')
 
 // Component-wise numeric compare. Works across Minecraft's switch from 1.21.x to
 // calendar versioning for free, since 1 sorts below 26.

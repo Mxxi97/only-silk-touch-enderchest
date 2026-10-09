@@ -107,7 +107,7 @@ processResources {
                              mod_authors                   : prop('mod_authors'),
                              mod_description               : prop('mod_description')]
     inputs.properties replaceProperties
-    filesMatching('fabric.mod.json') {
+    filesMatching(['fabric.mod.json', '*.mixins.json']) {
         expand replaceProperties
     }
 }

@@ -12,9 +12,10 @@ denies the break instead, so a mis-aimed pickaxe costs you nothing.
 - The contents of an ender chest are tied to the player, not the block, so nothing
   is ever lost either way — this is about not losing the chest itself.
 
-Runs on **Fabric**, **Forge** and **NeoForge**, from Minecraft 1.21.1 onwards. The
-mod has to be installed on the server (or on your world in single-player); it is
-the server that decides whether a block may be broken.
+Runs on **Fabric**, **Forge** and **NeoForge**, from Minecraft 1.21.1 onwards. It
+is **client-side only**: install it on your own game and it works on any server,
+vanilla ones included. Your client simply never starts mining the chest, so the
+server is never asked to break it. Fabric API is not required.
 
 ## Supported versions
 
@@ -54,7 +55,7 @@ of Minecraft versions.
 
 | Path | What it is |
 | --- | --- |
-| `common/java/` | The rule. Shared by all three loaders; only Minecraft API. |
+| `common/java/` | The rule and the client mixin that enforces it. Shared by all three loaders. |
 | `src/` | The NeoForge build (the repo root is the NeoForge project). |
 | `forge/` | The MinecraftForge build. Standalone Gradle build. |
 | `fabric/` | The Fabric build. Standalone Gradle build. |
@@ -68,24 +69,15 @@ are separate builds driven through the one wrapper at the repo root.
 
 ### Per-version overlays
 
-`src/main/java` in each loader targets the **newest** supported Minecraft version,
-so a new Minecraft release usually needs no change at all. Versions whose loader
-API has since moved are covered by a directory named
+The mod is one client mixin into `MultiPlayerGameMode.startDestroyBlock`, a method
+whose name and signature have not moved across the supported range, so there are
+no overlays today. Should that change, a directory named
 
 ```
 <loader>/src/versions/upto-<minecraftVersion>/java/
 ```
 
-which replaces same-named files for every Minecraft version at or below that one.
-There are two of these today, both for loader API changes rather than Minecraft
-ones:
-
-- `src/versions/upto-26.1.1/` — NeoForge replaced `BlockEvent.BreakEvent` with
-  `BreakBlockEvent` in Minecraft 26.1.2.
-- `forge/src/versions/upto-1.21.5/` — Forge moved to EventBus 7 in Minecraft 1.21.6,
-  where a cancellable listener returns `boolean` instead of calling `setCanceled`.
-
-Fabric needs no overlay; its block-break API has not moved.
+replaces same-named files for every Minecraft version at or below that one.
 
 ## Building
 

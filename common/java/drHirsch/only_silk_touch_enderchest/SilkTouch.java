@@ -11,8 +11,8 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 /**
- * The entire mod. Every loader has its own tiny entry point that registers a
- * block-break hook and defers the decision to {@link #shouldPreventBreaking}.
+ * The rule. The client mixin in the mixin package asks
+ * {@link #shouldPreventBreaking} before it lets the player start mining.
  *
  * This directory is added as an extra source root by all three loader builds
  * (see the `srcDir '../common/java'` line in each build.gradle), so the rule

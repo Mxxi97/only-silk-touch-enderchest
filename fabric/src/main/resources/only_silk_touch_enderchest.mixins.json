@@ -1,0 +1,11 @@
+{
+  "required": true,
+  "package": "drHirsch.only_silk_touch_enderchest.mixin",
+  "compatibilityLevel": "JAVA_${java_version}",
+  "client": [
+    "MultiPlayerGameModeMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
