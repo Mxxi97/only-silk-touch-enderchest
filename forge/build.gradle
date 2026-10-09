@@ -51,6 +51,9 @@ minecraft {
     runs {
         configureEach {
             workingDir = layout.projectDirectory.dir('run')
+            // Dev runs load the mod from class directories, not the jar, so the
+            // manifest attribute below is never seen there.
+            args '--mixin.config', "${modId}.mixins.json"
         }
 
         register('client')
@@ -86,6 +89,7 @@ apply from: '../gradle/mod-sources.gradle'
 var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
     var replaceProperties = [minecraft_version_range: minecraft_version_range,
                              forge_version_range    : forge_version_range,
+                             java_version           : minecraftVersion.startsWith('1.') ? 21 : 25,
                              loader_version_range   : loader_version_range,
                              mod_id                 : modId,
                              mod_name               : prop('mod_name'),
@@ -100,6 +104,13 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
 }
 
 sourceSets.main.resources.srcDir generateModMetadata
+
+// Forge has no mods.toml entry for mixin configs; it reads them from the manifest.
+jar {
+    manifest {
+        attributes 'MixinConfigs': "${modId}.mixins.json"
+    }
+}
 
 idea {
     module {
