@@ -9,16 +9,13 @@
     "${mod_authors}"
   ],
   "license": "${mod_license}",
-  "environment": "*",
-  "entrypoints": {
-    "main": [
-      "drHirsch.only_silk_touch_enderchest.OnlySilkTouchEnderchest"
-    ]
-  },
+  "environment": "client",
+  "mixins": [
+    "only_silk_touch_enderchest.mixins.json"
+  ],
   "depends": {
     "fabricloader": "${fabric_loader_range}",
     "minecraft": "${fabric_minecraft_version_range}",
-    "java": ">=${java_version}",
-    "fabric-api": "*"
+    "java": ">=${java_version}"
   }
 }
