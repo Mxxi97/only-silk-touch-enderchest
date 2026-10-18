@@ -23,7 +23,7 @@ server is never asked to break it. Fabric API is not required.
 
 | Minecraft | NeoForge | Forge | Fabric |
 | --- | --- | --- | --- |
-| 26.3 (beta) | yes | yes | yes |
+| 26.3 | yes | yes | yes |
 | 26.2 | yes | yes | yes |
 | 26.1.2 | yes | yes | yes |
 | 26.1.1 (beta) | yes | yes | yes |
