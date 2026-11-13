@@ -124,8 +124,8 @@
     },
     {
       "minecraft": "26.3",
-      "neoforge": "26.3.0.102",
-      "forge": "26.3-66.1.5",
+      "neoforge": "26.3.0.103",
+      "forge": "26.3-66.1.8",
       "fabric": "0.166.2+26.3",
       "beta": false,
       "parchment": null
