@@ -4,7 +4,7 @@
   "targets": [
     {
       "minecraft": "1.21.1",
-      "neoforge": "21.1.266",
+      "neoforge": "21.1.267",
       "forge": "1.21.1-52.1.21",
       "fabric": "0.116.18+1.21.1",
       "beta": false,
@@ -108,7 +108,7 @@
     },
     {
       "minecraft": "26.1.2",
-      "neoforge": "26.1.2.126",
+      "neoforge": "26.1.2.127",
       "forge": "26.1.2-64.1.6",
       "fabric": "0.155.3+26.1.2",
       "beta": false,
@@ -116,7 +116,7 @@
     },
     {
       "minecraft": "26.2",
-      "neoforge": "26.2.0.93",
+      "neoforge": "26.2.0.95",
       "forge": "26.2-65.1.6",
       "fabric": "0.161.0+26.2",
       "beta": false,
@@ -124,7 +124,7 @@
     },
     {
       "minecraft": "26.3",
-      "neoforge": "26.3.0.103",
+      "neoforge": "26.3.0.110",
       "forge": "26.3-66.1.8",
       "fabric": "0.166.2+26.3",
       "beta": false,
